@@ -49,6 +49,8 @@ class ToolRunner:
         self.confirm_callback = confirm_callback or (lambda msg: input(msg).strip().lower() in ("o", "oui", "y", "yes"))
         # Callback appelé pour chaque ligne de sortie bash en temps réel
         self.on_bash_line = on_bash_line or (lambda line: None)
+        # Cache read_file : clé (path, start, end) → (mtime_ns, résultat)
+        self._read_cache = {}
 
     # ── bash ────────────────────────────────────────────────────────────────
     def bash(self, command: str) -> str:
@@ -109,7 +111,7 @@ class ToolRunner:
                     self.cwd = new_cwd
                 full = before
             out = full.strip() or "(aucune sortie)"
-            return _truncate(out)
+            return _truncate(out) + f"\n[exit code: {proc.returncode}]"
         except Exception as e:
             return f"Erreur: {e}"
 
@@ -117,13 +119,20 @@ class ToolRunner:
     def read_file(self, path: str, start: int = None, end: int = None) -> str:
         try:
             p = self._resolve(path)
+            mtime = p.stat().st_mtime_ns
+            key = (str(p), start, end)
+            cached = self._read_cache.get(key)
+            if cached and cached[0] == mtime:
+                return f"(inchangé — contenu identique à la lecture précédente de {path})"
             text = p.read_text(encoding="utf-8", errors="replace")
             if start is not None or end is not None:
                 lines = text.splitlines()
                 s = (start or 1) - 1
                 e = end if end is not None else len(lines)
                 text = "\n".join(lines[max(s, 0):e])
-            return _truncate(text)
+            result = _truncate(text)
+            self._read_cache[key] = (mtime, result)
+            return result
         except Exception as e:
             return f"Erreur lecture : {e}"
 
@@ -136,7 +145,9 @@ class ToolRunner:
                     f.write(content)
             else:
                 p.write_text(content, encoding="utf-8")
-            return f"✓ Écrit ({len(content)} caractères) → {p}"
+            check = self._post_write_check(path)
+            suffix = f"\n{check}" if check else ""
+            return f"✓ Écrit ({len(content)} caractères) → {p}{suffix}"
         except Exception as e:
             return f"Erreur écriture : {e}"
 
@@ -147,11 +158,20 @@ class ToolRunner:
             occurrences = text.count(old)
             if occurrences == 0:
                 return f"Erreur : chaîne introuvable dans {p}"
-            if count > 0 and occurrences != count:
+            if count == 0:
+                # 0 = pas de vérification de count : on ne remplace que la 1re occurrence
+                text = text.replace(old, new, 1)
+                p.write_text(text, encoding="utf-8")
+                check = self._post_write_check(path)
+                suffix = f"\n{check}" if check else ""
+                return f"✓ Remplacé 1 occurrence (sur {occurrences}) dans {p}{suffix}"
+            if occurrences != count:
                 return f"Erreur : {occurrences} occurrence(s) trouvée(s), attendu {count}. Précise davantage le contexte."
             text = text.replace(old, new)
             p.write_text(text, encoding="utf-8")
-            return f"✓ Remplacé {occurrences} occurrence(s) dans {p}"
+            check = self._post_write_check(path)
+            suffix = f"\n{check}" if check else ""
+            return f"✓ Remplacé {occurrences} occurrence(s) dans {p}{suffix}"
         except Exception as e:
             return f"Erreur édition : {e}"
 
@@ -173,7 +193,13 @@ class ToolRunner:
                 output = (result.stdout + (("\n" + result.stderr) if result.stderr else "")).strip()
                 if result.returncode != 0:
                     return f"Erreur patch : {output or 'échec inconnu'}"
-                return output or "✓ Patch appliqué"
+                checks = []
+                for m in re.finditer(r'^\+\+\+ b/(.+\.py)\s*$', patch_text, re.MULTILINE):
+                    check = self._post_write_check(m.group(1))
+                    if check:
+                        checks.append(f"{m.group(1)} : {check}")
+                suffix = "\n" + "\n".join(checks) if checks else ""
+                return (output or "✓ Patch appliqué") + suffix
             finally:
                 try:
                     os.unlink(patch_path)
@@ -204,6 +230,29 @@ class ToolRunner:
             p = Path(self.cwd) / p
         return p
 
+    def _check_python_syntax(self, path: Path) -> str:
+        """Vérifie la syntaxe d'un fichier .py sans créer de __pycache__."""
+        try:
+            p = path if path.is_absolute() else Path(self.cwd) / path
+            code = "import sys\ncompile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')"
+            r = subprocess.run(
+                ["python3", "-I", "-S", "-c", code, str(p)],
+                capture_output=True, text=True, timeout=15, cwd=self.cwd,
+            )
+            if r.returncode == 0:
+                return "✓ synthaxe Python OK"
+            err = (r.stderr or "").strip().splitlines()
+            detail = "\n".join(err[-5:]) if err else "erreur inconnue"
+            return f"⚠ Erreur de syntaxe Python :\n{detail}"
+        except Exception as e:
+            return f"⚠ Vérification syntaxe impossible : {e}"
+
+    def _post_write_check(self, path: str) -> str:
+        p = self._resolve(path)
+        if p.suffix == ".py" and p.exists():
+            return self._check_python_syntax(p)
+        return ""
+
     # ── python sandbox (process séparé, pas d'accès direct à l'agent) ───────
     def run_python(self, code: str) -> str:
         log.info("run_python")
@@ -218,7 +267,8 @@ class ToolRunner:
                 },
             )
             out = (r.stdout + (("\n" + r.stderr) if r.stderr else "")).strip()
-            return _truncate(out) if out else "(aucune sortie)"
+            out = out if out else "(aucune sortie)"
+            return _truncate(out) + f"\n[exit code: {r.returncode}]"
         except subprocess.TimeoutExpired:
             return "Erreur: timeout (30s)"
         except Exception as e:
@@ -231,6 +281,24 @@ class ToolRunner:
     # ── question utilisateur ──────────────────────────────────────────────
     def question(self, question: str) -> str:
         return _ui.show_question(question)
+
+    # ── todo list (état renvoyé tel quel, stateless) ────────────────────────
+    def todo(self, tasks: list) -> str:
+        icons = {"pending": "•", "in_progress": "▶", "done": "✓"}
+        lines = []
+        for i, t in enumerate(tasks or [], 1):
+            if not isinstance(t, dict):
+                continue
+            title = str(t.get("title", "")).strip()
+            if not title:
+                continue
+            status = t.get("status", "pending")
+            if status not in icons:
+                status = "pending"
+            lines.append(f"{icons[status]} {i}. {title}")
+        if not lines:
+            return "Todo list vidée."
+        return "Todo list mise à jour :\n" + "\n".join(lines)
 
     # ── http (lecture seule, pas d'env réseau arbitraire dangereux) ─────────
     def http_get(self, url: str) -> str:
@@ -330,7 +398,7 @@ NATIVE_TOOL_SCHEMAS = [SUBAGENT_TOOL_SCHEMA,
                     "path": {"type": "string"},
                     "old": {"type": "string", "description": "Texte exact à remplacer."},
                     "new": {"type": "string", "description": "Texte de remplacement."},
-                    "count": {"type": "integer", "description": "Nombre d'occurrences attendu (0 = ignorer la vérification).", "default": 1},
+                    "count": {"type": "integer", "description": "Nombre d'occurrences attendu. 0 = remplacer uniquement la première occurrence.", "default": 1},
                 },
                 "required": ["path", "old", "new"],
             },
@@ -382,6 +450,31 @@ NATIVE_TOOL_SCHEMAS = [SUBAGENT_TOOL_SCHEMA,
                 "type": "object",
                 "properties": {"args": {"type": "string", "description": "Arguments git, ex: 'status -s' ou 'commit -m \"msg\"'."}},
                 "required": ["args"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo",
+            "description": "Remplace la todo list de la session. Utilise-la pour planifier un travail multi-étapes et la mettre à jour au fur et à mesure (un seul item in_progress à la fois).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "Liste complète des tâches (remplace l'ancienne liste).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "Description de la tâche."},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "done"], "default": "pending"},
+                            },
+                            "required": ["title", "status"],
+                        },
+                    },
+                },
+                "required": ["tasks"],
             },
         },
     },

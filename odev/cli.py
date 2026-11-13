@@ -34,16 +34,23 @@ from .sessions import list_sessions, save_session, load_session, delete_session
 from .agents import AGENT_TYPES, get_system_prompt
 from .agent import Agent
 from . import ui
+from . import repomap
+from . import providers
 
 CURRENT_AGENT_TYPE = "auto"
 
 
-def build_system_prompt(memory: dict, agent_type: str = None) -> str:
+def build_system_prompt(memory: dict, agent_type: str = None, cfg: dict = None) -> str:
     base = get_system_prompt(agent_type or "auto")
+    parts = [base]
     memory_block = build_memory_block(memory)
-    if not memory_block:
-        return base
-    return base + "\n\n" + memory_block
+    if memory_block:
+        parts.append(memory_block)
+    if cfg is None or cfg.get("repo_map", True):
+        repo_map = repomap.get_repo_map()
+        if repo_map:
+            parts.append(repo_map + "\nUtilise cette carte pour naviguer ; read_file pour le détail.")
+    return "\n\n".join(parts)
 
 SHELL_BUILTINS = {
     "ls", "ll", "la", "pwd", "cat", "less", "head", "tail", "grep", "find",
@@ -70,21 +77,37 @@ def is_shell_command(text: str) -> bool:
     )
 
 
-def check_model(client, model: str) -> str:
+# Modèles non conversationnels fréquents sur les APIs (Groq, etc.) —
+# à exclure du fallback pour ne pas basculer sur whisper/TTS/gardes.
+_NON_CHAT_HINTS = ("whisper", "orpheus", "guard", "safeguard", "tts", "embed", "rerank")
+
+
+def _is_chat_model(name: str) -> bool:
+    n = name.lower()
+    return not any(h in n for h in _NON_CHAT_HINTS)
+
+
+def check_model(client, model: str, allow_fallback: bool = True):
+    """Retourne le nom du modèle à utiliser, ou None si introuvable
+    (quand allow_fallback=False — l'appelant garde son modèle courant)."""
     try:
         available = [m.model for m in client.list().models]
     except Exception:
-        ui.console.print(f"[error]✗ Impossible de contacter Ollama[/error]")
+        ui.console.print(f"[error]✗ Impossible de contacter le provider[/error]")
         sys.exit(1)
-    if model not in available:
-        ui.console.print(f"[warn]⚠ '{model}' non trouvé[/warn]")
-        ui.console.print(f"[dim]Disponibles : {', '.join(available)}[/dim]")
-        if available:
-            model = available[0]
-            ui.console.print(f"[dim]→ fallback sur {model}[/dim]")
-        else:
-            sys.exit(1)
-    return model
+    if model in available:
+        return model
+    ui.console.print(f"[warn]⚠ '{model}' non trouvé[/warn]")
+    ui.console.print(f"[dim]Disponibles : {', '.join(available)}[/dim]")
+    if not allow_fallback:
+        return None
+    chat_models = [m for m in available if _is_chat_model(m)]
+    pool = chat_models or available
+    if pool:
+        model = pool[0]
+        ui.console.print(f"[dim]→ fallback sur {model}[/dim]")
+        return model
+    sys.exit(1)
 
 
 def confirm_callback(message: str) -> bool:
@@ -104,6 +127,8 @@ def make_agent(client, cfg, agent_type: str = "auto") -> Agent:
         on_stream_start=ui.start_stream,
         on_stream_token=ui.stream_token,
         on_stream_end=ui.end_stream,
+        on_wait_start=ui.start_wait,
+        on_wait_stop=ui.stop_wait,
     )
 
 
@@ -132,8 +157,9 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
             ui.console.print()
             for m in client.list().models:
                 mark = "[agent]●[/agent]" if m.model == model else "[dim]○[/dim]"
-                size = f"{m.size / 1e9:.1f} Go"
-                ui.console.print(f"  {mark} {m.model}  [dim]{size}[/dim]")
+                size = f"{m.size / 1e9:.1f} Go" if getattr(m, "size", 0) else ""
+                tag = "" if _is_chat_model(m.model) else " [dim](non-chat)[/dim]"
+                ui.console.print(f"  {mark} {m.model}  [dim]{size}[/dim]{tag}")
             ui.console.print()
         except Exception as e:
             ui.console.print(f"[error]✗ {e}[/error]")
@@ -142,10 +168,18 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
         if len(parts) < 2:
             ui.console.print(f"[dim]actuel : {model}[/dim]")
         else:
-            new_model = check_model(client, parts[1].strip())
-            model = new_model
-            messages = [messages[0]]
-            ui.console.print(f"[dim]→ {model} (historique réinitialisé)[/dim]")
+            arg = parts[1].strip()
+            if arg.lower() in ("list", "ls"):
+                ui.console.print("[dim]Pour lister les modèles : /models[/dim]")
+                new_model = None
+            else:
+                new_model = check_model(client, arg, allow_fallback=False)
+            if new_model:
+                model = new_model
+                messages = [messages[0]]
+                ui.console.print(f"[dim]→ {model} (historique réinitialisé)[/dim]")
+            elif arg.lower() not in ("list", "ls"):
+                ui.console.print(f"[warn]Modèle inchangé : {model}[/warn]")
 
     elif action == "/cd":
         if len(parts) > 1:
@@ -181,7 +215,7 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
             chosen = parts[1].strip().lower()
             if chosen in AGENT_TYPES:
                 agent_type = chosen
-                messages[0]["content"] = build_system_prompt(memory, agent_type)
+                messages[0]["content"] = build_system_prompt(memory, agent_type, cfg)
                 ui.console.print(f"[success]✓ Agent : {AGENT_TYPES[chosen]['name']}[/success]")
             else:
                 ui.console.print(f"[warn]Agent inconnu. Disponibles : {', '.join(AGENT_TYPES)}[/warn]")
@@ -262,8 +296,7 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
         ui.show_sessions_table(list_sessions())
 
     elif action == "/config":
-        for k, v in cfg.items():
-            ui.console.print(f"  [dim]{k}[/dim] = {v}")
+        ui.show_config_table(cfg)
 
     elif action == "/set":
         if len(parts) < 2 or len(parts[1].split(None, 1)) < 2:
@@ -287,6 +320,8 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
                     save_config(cfg)
                     if key == "ui_style":
                         apply_ui_style(str(cfg[key]))
+                    elif key == "ui_compact":
+                        ui.set_compact(bool(cfg[key]))
                     ui.console.print(f"[success]✓ {key} = {cfg[key]}[/success]")
                 except ValueError:
                     ui.console.print(f"[error]✗ Valeur invalide pour {key}[/error]")
@@ -299,9 +334,9 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
 
     save_memory(memory)
     if messages:
-        messages[0]["content"] = build_system_prompt(memory, agent_type)
+        messages[0]["content"] = build_system_prompt(memory, agent_type, cfg)
     else:
-        messages = [{"role": "system", "content": build_system_prompt(memory, agent_type)}]
+        messages = [{"role": "system", "content": build_system_prompt(memory, agent_type, cfg)}]
     return model, messages, memory, agent_type
 
 
@@ -315,27 +350,34 @@ def main():
 
     cfg = load_config()
     apply_ui_style(cfg.get("ui_style", "codex"))
+    ui.set_compact(cfg.get("ui_compact", True))
     if args.model:
         cfg["model"] = args.model
     if args.host:
         cfg["ollama_host"] = args.host
 
-    client = ollama.Client(host=cfg["ollama_host"])
+    client = providers.get_client(cfg)
     model = check_model(client, cfg["model"])
+    if cfg.get("num_ctx", 16384) < 32768:
+        ui.console.print(
+            f"[warn]⚠ num_ctx={cfg.get('num_ctx')} est faible pour un agent "
+            "(32k+ recommandé). L'historique sera tronqué plus vite — "
+            "/set num_ctx 65536 si votre VRAM le permet.[/warn]"
+        )
     loaded, errors = load_skills()
     memory = load_memory()
 
     agent_type = "auto"
-    messages = [{"role": "system", "content": build_system_prompt(memory, agent_type)}]
+    messages = [{"role": "system", "content": build_system_prompt(memory, agent_type, cfg)}]
     if args.resume:
         result = load_session("_last")
         if result:
             model, messages, agent_type = result
             if not messages:
-                messages = [{"role": "system", "content": build_system_prompt(memory, agent_type)}]
+                messages = [{"role": "system", "content": build_system_prompt(memory, agent_type, cfg)}]
             elif messages[0].get("role") != "system":
-                messages.insert(0, {"role": "system", "content": build_system_prompt(memory, agent_type)})
-            messages[0]["content"] = build_system_prompt(memory, agent_type)
+                messages.insert(0, {"role": "system", "content": build_system_prompt(memory, agent_type, cfg)})
+            messages[0]["content"] = build_system_prompt(memory, agent_type, cfg)
 
     ui.banner(model, loaded, os.getcwd(), memory=memory, agent_type=agent_type)
     for e in errors:
@@ -351,7 +393,7 @@ def main():
 
     while True:
         try:
-            inp = ui.show_user_prompt(os.getcwd(), memory, agent_type).strip()
+            inp = ui.show_user_prompt(os.getcwd(), memory, agent_type, model).strip()
         except (EOFError, KeyboardInterrupt):
             ui.console.print("\n[dim]À bientôt.[/dim]")
             if cfg.get("auto_save_session"):
@@ -366,6 +408,7 @@ def main():
             agent.cfg = cfg
             agent.runner.cfg = cfg
             agent.agent_type = agent_type
+            agent.runner.cwd = os.getcwd()  # resync après /cd ou autre changement de cwd
             continue
 
         if is_shell_command(inp):

@@ -37,6 +37,7 @@ ALL_TOOLS: set[str] = {
     "http_get",
     "subagent",
     "question",
+    "todo",
 }
 
 # None = tous les outils autorisés
@@ -54,7 +55,7 @@ TOOL_RESTRICTIONS: dict[AgentType, Optional[set[str]]] = {
         "git",
         "run_python",
     },
-    "planner": {"read_file", "list_dir", "subagent", "bash"},
+    "planner": {"read_file", "list_dir", "subagent", "bash", "todo"},
 }
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,7 @@ Règles impératives :
 - Langue : français pour les réponses, anglais uniquement pour le code et ses commentaires.
 - Ne suppose jamais le contenu d'un fichier : lis-le d'abord avec read_file.
 - Ambiguïté ou information manquante → utilise l'outil **question** avant d'agir.
+- Tâche multi-étapes (3+ actions) → planifie d'abord avec l'outil **todo**, puis mets-la à jour à chaque étape (un seul item in_progress).
 - Action irréversible (suppression, réécriture complète) → annonce-la en une phrase, puis agis.
 - Préfère edit_file / apply_patch à write_file pour les fichiers existants.
 - Après chaque écriture de code : vérifie la syntaxe. Après chaque commande : vérifie le résultat.

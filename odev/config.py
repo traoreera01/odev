@@ -20,17 +20,24 @@ for d in (ODEV_DIR, SKILLS_DIR, SESSIONS_DIR):
 
 DEFAULTS = {
     "model": "qwen2.5-coder:7b",
+    "provider": "ollama",          # ollama | openai | anthropic
+    "api_base": "",                # base URL pour openai/anthropic (vide = défaut)
+    "api_key_env": "ODEV_API_KEY", # nom de la variable d'env contenant la clé
     "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
     "keep_alive": "10m",
     "max_loops": 24,
     "num_ctx": 16384,
     "temperature": 0.1,
     "max_history_messages": 60,   # au-delà, on compresse/tronque
+    "max_subagent_depth": 2,      # profondeur max de délégation subagent
     "bash_timeout": 60,
     "confirm_dangerous": True,
     "stream": True,
     "auto_save_session": True,
+    "repo_map": True,
+    "compact": "trim",           # "trim" = troncature, "smart" = résumé par le modèle
     "ui_style": "codex",
+    "ui_compact": True,       # False = panneaux d'outils détaillés
     "editor": os.environ.get("EDITOR", "nano"),
 }
 

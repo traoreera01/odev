@@ -17,4 +17,7 @@ dependencies = [
 odev = "odev.cli:main"
 
 [tool.setuptools]
-packages = ["odev"]
+packages = ["odev", "odev.agents"]
+
+[tool.setuptools.package-data]
+odev = ["skills/*.py"]

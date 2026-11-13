@@ -3,10 +3,18 @@ odev.sessions — Sauvegarde / chargement / listing de conversations sur disque.
 """
 
 import json
+import re
 import time
 from pathlib import Path
 
 from .config import SESSIONS_DIR
+
+
+def _safe_name(name: str) -> str:
+    """Nettoie un nom de session pour éviter toute sortie du dossier sessions."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    safe = re.sub(r"\.{2,}", ".", safe).strip(".")
+    return safe or "session"
 
 
 def list_sessions() -> list:
@@ -28,7 +36,7 @@ def list_sessions() -> list:
 
 
 def save_session(name: str, model: str, messages: list, agent_type: str = "auto") -> Path:
-    fpath = SESSIONS_DIR / f"{name}.json"
+    fpath = SESSIONS_DIR / f"{_safe_name(name)}.json"
     payload = {
         "model": model,
         "messages": messages,
@@ -40,7 +48,7 @@ def save_session(name: str, model: str, messages: list, agent_type: str = "auto"
 
 
 def load_session(name: str):
-    fpath = SESSIONS_DIR / f"{name}.json"
+    fpath = SESSIONS_DIR / f"{_safe_name(name)}.json"
     if not fpath.exists():
         return None
     data = json.loads(fpath.read_text(encoding="utf-8"))
@@ -48,7 +56,7 @@ def load_session(name: str):
 
 
 def delete_session(name: str) -> bool:
-    fpath = SESSIONS_DIR / f"{name}.json"
+    fpath = SESSIONS_DIR / f"{_safe_name(name)}.json"
     if fpath.exists():
         fpath.unlink()
         return True

@@ -93,3 +93,21 @@ When a model doesn't emit structured tool calls (common with small models), `ext
 - `bash_timeout` — shell timeout in seconds
 - `confirm_dangerous` — prompt before destructive shell commands
 - `auto_save_session` — persist history automatically
+
+<!-- memexa:start -->
+## Memexa memory
+
+Memexa is this project's persistent memory: decisions, bugs, conventions and progress. It outlives your context window and is shared with the team. Use it without being asked.
+
+1. At the start of every task or session, call get_context before reading code or answering. It tells you what was decided, what is in progress and what is known to be broken.
+2. When you or the user choose between alternatives (library, pattern, architecture, convention), call add_decision right away with the title, the reason and the alternatives rejected.
+3. After you diagnose and fix a bug, call log_bug with the root cause and the fix.
+4. Before proposing a design or reversing earlier work, call search_memory to check that you do not contradict a previous decision.
+5. At the end of a session, call update_context once with what is done, what is in progress, the next step and any blockers.
+
+Rules:
+- Record the why, which the code does not show. Do not record what the diff already says.
+- Never store secrets, tokens, passwords or personal data.
+- One entry per decision: search before adding, do not duplicate.
+- If a Memexa call fails, carry on with the task and mention it. Never block on Memexa.
+<!-- memexa:end -->
